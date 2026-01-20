@@ -4,7 +4,7 @@ import pandas as pd
 
 rows = []
 
-with zipfile.ZipFile("submissions.zip") as z:
+with zipfile.ZipFile("../submissions.zip") as z:
     for name in z.namelist():
         if not name.endswith(".json"):
             continue
