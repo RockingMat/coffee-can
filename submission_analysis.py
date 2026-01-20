@@ -80,6 +80,10 @@ try:
                 print(f"[DEBUG] {name}: Unknown format. Keys: {list(data.keys())}")
                 continue
 
+            # Ensure CIK is exactly 10 digits
+            if cik:
+                cik = str(cik).zfill(10)
+
             forms = filings.get("form", [])
             dates = filings.get("filingDate", [])
             accessions = filings.get("accessionNumber", [])
