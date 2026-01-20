@@ -87,11 +87,10 @@ try:
 
             # Ensure all lists are zipped
             for form, date, acc, doc in zip(forms, dates, accessions, primary_docs):
-                if form == "10-K":
+                # Filter for 10-K AND ensure primary_document is not empty
+                if form == "10-K" and doc and doc.strip():
                     rows.append({
                         "cik": cik,
-                        "ticker": ticker,
-                        "title": title,
                         "filing_date": date,
                         "accession": acc,
                         "primary_document": doc
@@ -100,7 +99,15 @@ try:
     df = pd.DataFrame(rows)
     output_file = "submissions_10k.parquet"
     df.to_parquet(output_file)
+    
+    # Simple summary stats instead of stats check loop
     print(f"Successfully processed {len(rows)} filings and saved to {output_file}")
+    
+    if not df.empty:
+        print("\nSample of generated data:")
+        print(df.head())
+    else:
+        print("\nWarning: DataFrame is empty. No 10-K filings with primary documents found.")
 
 except FileNotFoundError:
     print("Error: ../submissions.zip not found. Please ensure the file exists.")
