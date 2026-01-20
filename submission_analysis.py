@@ -3,84 +3,45 @@ import json
 import pandas as pd
 import re
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 
-rows = []
+# Constants
+ZIP_PATH = "../submissions.zip"
+OUTPUT_FILE = "submissions_10k.parquet"
+BATCH_SIZE = 1000  # Number of files to process per batch in each worker
 
-print("Processing submissions.zip...")
-
-try:
-    with zipfile.ZipFile("../submissions.zip") as z:
-        all_files = z.namelist()
-        print(f"Total files available in zip: {len(all_files)}")
-        
-        processed_count = 0
-        LIMIT = None  # Limit for testing purposes
-
-        for name in all_files:
-            if LIMIT is not None and processed_count >= LIMIT:
-                print(f"Hit limit of {LIMIT} files. Stopping loop.")
-                break
-
+def process_batch(file_batch):
+    """Worker function to process a batch of files from the zip."""
+    batch_rows = []
+    # Re-open the ZIP in each worker process for thread/process safety
+    with zipfile.ZipFile(ZIP_PATH, 'r') as z:
+        for name in file_batch:
             if not name.endswith(".json"):
                 continue
-            
-            processed_count += 1
 
-            # Parse CIK from filename (format: CIKxxxxxxxxxx.json or ...-submissions-xxx.json)
-            # This is reliable even if the JSON relies on context
+            # Parse CIK from filename
             cik_from_filename = None
             match = re.search(r'CIK(\d+)', name, re.IGNORECASE)
             if match:
                 cik_from_filename = str(int(match.group(1)))
 
-            with z.open(name) as f:
-                try:
+            try:
+                with z.open(name) as f:
                     data = json.load(f)
-                except json.JSONDecodeError:
-                    continue
-
-            # Initialize variables
-            cik = None
-            ticker = None
-            title = ""
-            filings = {}
-
-            # Determine file structure (Main vs Extension)
-            if "filings" in data:
-                # Main submission file
-                cik = data.get("cik", cik_from_filename)
-                ticker_list = data.get("tickers", [])
-                ticker = ticker_list[0] if ticker_list else None
-                title = data.get("name", "")
-                filings = data.get("filings", {}).get("recent", {})
-
-                # DEBUG: Check keys
-                if len(rows) < 5:
-                    print(f"\n[DEBUG] {name} (Main): Ticker={ticker}, Name={title}")
-                    if "primaryDocument" not in filings:
-                        print(f"    WARNING: 'primaryDocument' NOT found. Available keys: {list(filings.keys())}")
-                    else:
-                        print(f"    'primaryDocument' found (Length: {len(filings['primaryDocument'])})")
-
-            elif "accessionNumber" in data:
-                # Extension file (e.g. CIK...-submissions-001.json)
-                cik = cik_from_filename
-                # Extension files typically lack metadata like ticker/name
-                filings = data
-
-                # DEBUG: Check keys
-                if len(rows) < 5:
-                    print(f"\n[DEBUG] {name} (Extension): CIK={cik}")
-                    if "primaryDocument" not in filings:
-                        print(f"    WARNING: 'primaryDocument' NOT found. Available keys: {list(filings.keys())}")
-                    else:
-                        print(f"    'primaryDocument' found (Length: {len(filings['primaryDocument'])})")
-            else:
-                # Unknown format, skip
-                print(f"[DEBUG] {name}: Unknown format. Keys: {list(data.keys())}")
+            except (json.JSONDecodeError, Exception):
                 continue
 
-            # Ensure CIK is exactly 10 digits
+            # Identify structure
+            if "filings" in data:
+                cik = data.get("cik", cik_from_filename)
+                filings = data.get("filings", {}).get("recent", {})
+            elif "accessionNumber" in data:
+                cik = cik_from_filename
+                filings = data
+            else:
+                continue
+
             if cik:
                 cik = str(cik).zfill(10)
 
@@ -89,31 +50,54 @@ try:
             accessions = filings.get("accessionNumber", [])
             primary_docs = filings.get("primaryDocument", [])
 
-            # Ensure all lists are zipped
             for form, date, acc, doc in zip(forms, dates, accessions, primary_docs):
-                # Filter for 10-K AND ensure primary_document is not empty
                 if form == "10-K" and doc and doc.strip():
-                    rows.append({
+                    batch_rows.append({
                         "cik": cik,
                         "filing_date": date,
                         "accession": acc,
                         "primary_document": doc
                     })
+    return batch_rows
 
-    df = pd.DataFrame(rows)
-    output_file = "submissions_10k.parquet"
-    df.to_parquet(output_file)
-    
-    # Simple summary stats instead of stats check loop
-    print(f"Successfully processed {len(rows)} filings and saved to {output_file}")
-    
-    if not df.empty:
-        print("\nSample of generated data:")
-        print(df.head())
-    else:
-        print("\nWarning: DataFrame is empty. No 10-K filings with primary documents found.")
+def main():
+    print(f"Opening {ZIP_PATH}...")
+    try:
+        with zipfile.ZipFile(ZIP_PATH, 'r') as z:
+            all_files = [n for n in z.namelist() if n.endswith(".json")]
+            total_files = len(all_files)
+            print(f"Total JSON files to process: {total_files}")
 
-except FileNotFoundError:
-    print("Error: ../submissions.zip not found. Please ensure the file exists.")
-except Exception as e:
-    print(f"An error occurred: {e}")
+        # Split files into batches
+        batches = [all_files[i:i + BATCH_SIZE] for i in range(0, total_files, BATCH_SIZE)]
+        print(f"Split into {len(batches)} batches of {BATCH_SIZE} files.")
+
+        rows = []
+        # Use CPU count to decide number of processes
+        max_workers = os.cpu_count() or 4
+        print(f"Starting extraction using {max_workers} processes...")
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_batch = {executor.submit(process_batch, batch): batch for batch in batches}
+            
+            completed = 0
+            for future in as_completed(future_to_batch):
+                result = future.result()
+                rows.extend(result)
+                completed += 1
+                if completed % 10 == 0 or completed == len(batches):
+                    print(f"Progress: {completed}/{len(batches)} batches done (Filings collected: {len(rows)})")
+
+        print("Creating DataFrame...")
+        df = pd.DataFrame(rows)
+        print(f"Saving to {OUTPUT_FILE}...")
+        df.to_parquet(OUTPUT_FILE)
+        print(f"Success! Processed {len(rows)} total 10-K filings.")
+
+    except FileNotFoundError:
+        print(f"Error: {ZIP_PATH} not found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
