@@ -14,7 +14,7 @@ try:
         print(f"Total files available in zip: {len(all_files)}")
         
         processed_count = 0
-        LIMIT = 10  # Limit for testing purposes
+        LIMIT = None  # Limit for testing purposes
 
         for name in all_files:
             if LIMIT is not None and processed_count >= LIMIT:
